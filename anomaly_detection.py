@@ -1,22 +1,20 @@
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 import numpy as np
+import tensorflow as tf
 import matplotlib.pyplot as plt
-from sklearn.model_selection import train_test_split
-import random
-from tensorflow.keras.models import load_model
-from tensorflow.keras.losses import MeanSquaredError
+from sklearn.ensemble import IsolationForest
+from sklearn.svm import OneClassSVM
 
-# Load the trained model
-autoencoder = load_model("autoencoder_model.h5", custom_objects={"mse": MeanSquaredError()})
+# Load the trained autoencoder model
+autoencoder = tf.keras.models.load_model("autoencoder_model.keras")
 print("Model loaded successfully!")
 
-# Set random seed for reproducibility
-np.random.seed(42)
-random.seed(42)
-
-# Load the dataset
-df = pd.read_csv("dataset_final.csv")  # Ensure the dataset is in the same directory
+# Load datasets
+df1 = pd.read_csv("dataset_final.csv")
+df2 = pd.read_csv("second_dataset.csv")
+    
+df = pd.concat([df1, df2], ignore_index=True)
 
 # Convert Unix timestamp to datetime format
 df["Time"] = pd.to_datetime(df["Time"], unit="s")
@@ -26,26 +24,58 @@ scaler = MinMaxScaler()
 df.iloc[:, 1:] = scaler.fit_transform(df.iloc[:, 1:])
 
 # Prepare the dataset (exclude the Time column)
-X = df.iloc[:, 1:].values  # Convert to NumPy array
+X = df.iloc[:, 1:].values
 
-# Split into training (80%) and testing (20%) sets
-_, X_test = train_test_split(X, test_size=0.2, random_state=42)  # No need for training set
-
-# Reconstruct the test data using the trained autoencoder
-X_test_pred = autoencoder.predict(X_test)
+# Reconstruct the data using the trained autoencoder
+X_pred = autoencoder.predict(X)
 
 # Calculate the reconstruction error
-reconstruction_error = np.mean(np.abs(X_test - X_test_pred), axis=1)
+reconstruction_error = np.mean(np.abs(X - X_pred), axis=1)
+
+# Calculate mean and standard deviation of reconstruction error
+mean_reconstruction_error = np.mean(reconstruction_error)
+std_reconstruction_error = np.std(reconstruction_error)
 
 # Set the anomaly threshold (mean + 3 standard deviations)
-threshold = np.mean(reconstruction_error) + 3 * np.std(reconstruction_error)
+threshold = mean_reconstruction_error + 3 * std_reconstruction_error
 
 # Classify anomalies (1 = anomaly, 0 = normal)
-anomalies = reconstruction_error > threshold
+anomalies_autoencoder = reconstruction_error > threshold
+
+detection_rate_autoencoder = np.sum(anomalies_autoencoder) / len(anomalies_autoencoder)
+
+# Train Isolation Forest on loaded data
+iso_forest = IsolationForest(contamination=0.05, random_state=42)
+iso_forest.fit(X)
+anomalies_iforest = iso_forest.predict(X)
+anomalies_iforest = anomalies_iforest == -1
+
+detection_rate_iforest = np.sum(anomalies_iforest) / len(anomalies_iforest)
+
+# Train One-Class SVM
+oc_svm = OneClassSVM(nu=0.05, kernel="rbf")
+oc_svm.fit(X)
+anomalies_ocsvm = oc_svm.predict(X)
+anomalies_ocsvm = anomalies_ocsvm == -1
+
+detection_rate_ocsvm = np.sum(anomalies_ocsvm) / len(anomalies_ocsvm)
+
+# Combine anomaly detections (Majority Voting)
+anomalies_combined = (anomalies_autoencoder.astype(int) + anomalies_iforest.astype(int) + anomalies_ocsvm.astype(int)) >= 2
+
+detection_rate_combined = np.sum(anomalies_combined) / len(anomalies_combined)
+
+# Print statistics
+print(f"Mean Reconstruction Error: {mean_reconstruction_error}")
+print(f"Standard Deviation of Reconstruction Error: {std_reconstruction_error}")
+print(f"Anomaly Threshold (Autoencoder): {threshold}")
+print(f"Detection Rate (Autoencoder): {detection_rate_autoencoder:.4f}")
+print(f"Detection Rate (Isolation Forest): {detection_rate_iforest:.4f}")
+print(f"Detection Rate (One-Class SVM): {detection_rate_ocsvm:.4f}")
+print(f"Detection Rate (Majority Voting): {detection_rate_combined:.4f}")
 
 # Print anomaly counts
-print(f"Total anomalies detected: {np.sum(anomalies)}")
-print(f"Anomaly threshold: {threshold}")
+print(f"Total anomalies detected: {np.sum(anomalies_combined)}")
 
 # Plot reconstruction error distribution
 plt.figure(figsize=(10, 5))
@@ -57,33 +87,29 @@ plt.legend()
 plt.title("Reconstruction Error Distribution")
 plt.show()
 
-# Add anomaly labels to the test dataset
-df_test = pd.DataFrame(X_test, columns=["Temperature", "Humidity", "Air Quality", "Light", "Loudness"])
-df_test["Reconstruction Error"] = reconstruction_error
-df_test["Anomaly"] = anomalies.astype(int)  # Convert Boolean to 0/1
+# Add anomaly labels to the dataset
+df_results = pd.DataFrame(X, columns=["Temperature", "Humidity", "Air Quality", "Light", "Loudness"])
+df_results["Reconstruction Error"] = reconstruction_error
+df_results["Anomaly"] = anomalies_combined.astype(int)
 
 # Show some detected anomalies
-anomalous_data = df_test[df_test["Anomaly"] == 1]
+anomalous_data = df_results[df_results["Anomaly"] == 1]
 print("Anomalous Data Samples:")
 print(anomalous_data.head())
-
-# Plot a sensor value (e.g., Humidity) over time with anomalies highlighted
-anomaly_indices = df_test[df_test["Anomaly"] == 1].index
 
 # Plot anomalies for all sensor features
 features = ["Temperature", "Humidity", "Air Quality", "Light", "Loudness"]
 
 for feature in features:
     plt.figure(figsize=(12, 6))
-    plt.plot(df_test.index, df_test[feature], label=feature, color="blue")
+    plt.plot(df_results.index, df_results[feature], label=feature, color="blue")
     
     # Highlight anomalies in red
-    anomaly_indices = df_test[df_test["Anomaly"] == 1].index
-    plt.scatter(anomaly_indices, df_test[feature].iloc[anomaly_indices], color="red", label="Anomalies", marker="o")
+    anomaly_indices = df_results[df_results["Anomaly"] == 1].index
+    plt.scatter(anomaly_indices, df_results[feature].iloc[anomaly_indices], color="red", label="Anomalies", marker="o")
 
     plt.xlabel("Time Index")
     plt.ylabel(feature)
     plt.title(f"{feature} Sensor Data with Anomalies")
     plt.legend()
     plt.show()
-
